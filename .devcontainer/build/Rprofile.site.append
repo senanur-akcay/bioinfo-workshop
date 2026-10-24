@@ -1,0 +1,58 @@
+
+## --- bioinfo-workshop (image) -----------------------------------------------
+## Package installs during the workshop use the same dated snapshot as the image.
+local({
+  snap <- Sys.getenv("CRAN_SNAPSHOT", "2026-09-18")
+  options(repos = c(CRAN = sprintf("https://p3m.dev/cran/__linux__/noble/%s", snap)))
+})
+
+## RStudio starts R sessions with a clean environment. start-rstudio.sh writes the
+## codespace's documented variables (GITHUB_TOKEN, GITHUB_USER, ...) to a private file;
+## load them here so RStudio's Terminal and Git pane can push to GitHub (R86).
+## A variable already set in this process is never overwritten.
+local({
+  f <- file.path(Sys.getenv("HOME"), ".local", "share", "rstudio-server", "session.env")
+  if (!file.exists(f)) return(invisible(NULL))
+  for (l in readLines(f, warn = FALSE)) {
+    i <- regexpr("=", l, fixed = TRUE)
+    if (i < 2L) next
+    name <- substring(l, 1L, i - 1L)
+    if (!nzchar(Sys.getenv(name))) {
+      do.call(Sys.setenv, stats::setNames(list(substring(l, i + 1L)), name))
+    }
+  }
+})
+
+## Open the repository's RStudio project the first time RStudio starts in a new
+## codespace, so the Files pane, the working directory and the Git tab are right.
+## The workspace path is written by on-create.sh; nothing happens outside RStudio
+## or when a project is already open.
+if (interactive() && identical(Sys.getenv("RSTUDIO"), "1")) {
+  setHook("rstudio.sessionInit", function(newSession) {
+    if (!isTRUE(newSession)) return(invisible(NULL))
+    if (!requireNamespace("rstudioapi", quietly = TRUE)) return(invisible(NULL))
+    if (!rstudioapi::isAvailable()) return(invisible(NULL))
+    if (!is.null(rstudioapi::getActiveProject())) return(invisible(NULL))
+    marker <- path.expand("~/.config/bioinfo-workshop/workspace")
+    if (!file.exists(marker)) return(invisible(NULL))
+    ws <- readLines(marker, n = 1L, warn = FALSE)
+    proj <- Sys.glob(file.path(ws, "*.Rproj"))
+    if (length(proj) >= 1L) rstudioapi::openProject(proj[[1L]], newSession = FALSE)
+    invisible(NULL)
+  }, action = "append")
+}
+## GitHub does not count work in the RStudio tab as codespace activity (R62, measured
+## 2026-10-05). Every top-level R command touches a marker file; keep-awake.sh, started by
+## the postAttachCommand in a VS Code terminal, turns a changed marker into terminal output,
+## which GitHub does count. Without R or terminal work the codespace still stops when idle.
+if (interactive()) local({
+  marker <- "/tmp/bioinfo-workshop-activity"
+  invisible(addTaskCallback(function(...) {
+    suppressWarnings(try({
+      if (!file.exists(marker)) file.create(marker)
+      Sys.setFileTime(marker, Sys.time())
+    }, silent = TRUE))
+    TRUE
+  }, name = "bioinfo-workshop-activity"))
+})
+## --- end bioinfo-workshop ---------------------------------------------------

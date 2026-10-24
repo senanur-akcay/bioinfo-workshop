@@ -1,0 +1,5 @@
+2026-10-13 first build of the Day-3 annotation files
+2026-10-13 second build (SIGPIPE in the report lines fixed; ClinVar contig line written directly)
+2026-10-13 third build: MANE Select gene annotation, gnomAD_ field names, ClinVar 20261011 pinned with CLNVID, README template
+2026-10-13 fourth build: README template revised after review (how to re-run, PBMC wording)
+2026-10-13 fifth build: README template wording (which lines the Day-3 script contains)

@@ -1,0 +1,17 @@
+# --- bioinfo-workshop: the conda command in every interactive bash ---
+# Activation of "base" happens at the end of the user's ~/.bashrc (home-bashrc.append),
+# after Ubuntu's ~/.bashrc has set the prompt; here it would be overwritten and the
+# prompt would not show "(base)" (seen in a codespace, 2026-10-01).
+if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
+    . /opt/conda/etc/profile.d/conda.sh
+fi
+
+# --- bioinfo-workshop: activity marker for keep-awake.sh (R62) ---
+# GitHub does not count work in the RStudio tab as codespace activity. Each prompt of an
+# interactive bash touches a marker; keep-awake.sh (postAttachCommand, a VS Code terminal)
+# turns a changed marker into terminal output, which GitHub does count.
+__bioinfo_workshop_activity() { touch /tmp/bioinfo-workshop-activity 2>/dev/null || true; }
+case ";${PROMPT_COMMAND:-};" in
+    *";__bioinfo_workshop_activity;"*) ;;
+    *) PROMPT_COMMAND="__bioinfo_workshop_activity${PROMPT_COMMAND:+;${PROMPT_COMMAND}}" ;;
+esac

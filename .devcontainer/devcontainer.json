@@ -1,0 +1,40 @@
+{
+  "name": "bioinfo-workshop (RStudio)",
+  "image": "ghcr.io/onedimkurt/bioinfo-workshop:latest",
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "8gb"
+  },
+  "remoteUser": "rstudio",
+  "userEnvProbe": "none",
+  "forwardPorts": [
+    8787
+  ],
+  "portsAttributes": {
+    "8787": {
+      "label": "RStudio",
+      "onAutoForward": "openBrowser"
+    },
+    "8788": {
+      "label": "RStudio (internal)",
+      "onAutoForward": "ignore"
+    }
+  },
+  "otherPortsAttributes": {
+    "onAutoForward": "ignore"
+  },
+  "postCreateCommand": "/usr/local/share/bioinfo-workshop/on-create.sh \"${containerWorkspaceFolder}\"",
+  "postAttachCommand": "/usr/local/share/bioinfo-workshop/start-rstudio.sh; exec /usr/local/share/bioinfo-workshop/keep-awake.sh",
+  "customizations": {
+    "codespaces": {
+      "openFiles": [
+        "README.md"
+      ]
+    },
+    "vscode": {
+      "settings": {
+        "files.eol": "\n"
+      }
+    }
+  }
+}

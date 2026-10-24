@@ -1,0 +1,397 @@
+# Assembles every workshop dataset (WORKSHOP.md D9, D13, D15), records provenance and
+# checksums, and publishes them as assets of the release "data-v1" of this repository.
+# Runs only in the organiser's repository, by hand (Actions > data > Run workflow).
+# All tool steps run inside the workshop image, so the versions are the trainees'.
+# Logs and the manifest go to the branch "ci-status" (status/data/).
+name: data
+
+on:
+  # A push that changes .github/data-run.txt starts a full run (release data-v1, nothing reused);
+  # the chat cannot press "Run workflow" without the owner's browser.
+  push:
+    branches: [main]
+    paths: [".github/data-run.txt"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release to create or update"
+        default: "data-v1"
+        required: true
+      reuse_run:
+        description: "Run id whose transcriptome and airway files to reuse (empty = build everything)"
+        default: ""
+        required: false
+
+permissions:
+  contents: write
+  packages: read
+  actions: read
+
+concurrency:
+  group: data
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GENCODE: "50"
+  WINDOW: "chr20:10000000-12000000"
+  SUBSET_PAIRS: "1000000"
+  SEED: "20261001"
+
+jobs:
+  transcriptome:
+    if: github.repository == 'onedimkurt/bioinfo-workshop' && inputs.reuse_run == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/onedimkurt/bioinfo-workshop:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download GENCODE transcripts and annotation
+        run: |
+          set -euxo pipefail
+          mkdir -p out log
+          base="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_${GENCODE}"
+          curl -fsSL --retry 5 -o gencode.all.transcripts.fa.gz "$base/gencode.v${GENCODE}.transcripts.fa.gz"
+          curl -fsSL --retry 5 -o gencode.gtf.gz "$base/gencode.v${GENCODE}.annotation.gtf.gz"
+          curl -fsSL --retry 5 -o MD5SUMS "$base/MD5SUMS" || true
+          ls -l out gencode.gtf.gz
+      - name: tx2gene and gene table from the GTF
+        run: |
+          set -euxo pipefail
+          zcat gencode.gtf.gz | awk -F'\t' '$3=="transcript"' \
+            | sed -E 's/.*gene_id "([^"]+)".*transcript_id "([^"]+)".*/\2\t\1/' \
+            | awk 'BEGIN{print "transcript_id\tgene_id"}{print}' | gzip -n > out/tx2gene.gencode.v${GENCODE}.tsv.gz
+          zcat gencode.gtf.gz | awk -F'\t' '$3=="gene"{print $1"\t"$9}' \
+            | sed -E 's/^([^\t]+)\t.*gene_id "([^"]+)".*gene_type "([^"]+)".*gene_name "([^"]+)".*/\2\t\4\t\3\t\1/' \
+            | awk 'BEGIN{print "gene_id\tgene_name\tgene_type\tchromosome"}{print}' | gzip -n > out/genes.gencode.v${GENCODE}.tsv.gz
+          zcat out/tx2gene.gencode.v${GENCODE}.tsv.gz | sed -n '1,3p'
+          zcat out/genes.gencode.v${GENCODE}.tsv.gz | sed -n '1,3p'
+          echo "transcripts: $(zcat out/tx2gene.gencode.v${GENCODE}.tsv.gz | tail -n +2 | wc -l)" | tee log/transcriptome.log
+          echo "genes: $(zcat out/genes.gencode.v${GENCODE}.tsv.gz | tail -n +2 | wc -l)" | tee -a log/transcriptome.log
+      - name: Transcriptome restricted to the reference chromosomes (the transcripts the GTF annotates)
+        # GENCODE's transcripts.fa also carries alternate-locus, patch and haplotype copies that the
+        # primary-assembly GTF (and so tx2gene) does not list. Indexed, they take reads from their primary
+        # genes and tximport then drops those reads (found by the Day-1 reference review, 2026-10-02).
+        run: |
+          set -euxo pipefail
+          zcat out/tx2gene.gencode.v${GENCODE}.tsv.gz | tail -n +2 | cut -f1 > keep.txt
+          zcat gencode.all.transcripts.fa.gz \
+            | awk 'BEGIN { while ((getline l < "keep.txt") > 0) k[l] = 1 }
+                   /^>/ { split(substr($0, 2), a, "|"); p = (a[1] in k) } p' \
+            | gzip -n > out/gencode.v${GENCODE}.transcripts.chr.fa.gz
+          all=$(zcat gencode.all.transcripts.fa.gz | grep -c '^>')
+          kept=$(zcat out/gencode.v${GENCODE}.transcripts.chr.fa.gz | grep -c '^>')
+          want=$(wc -l < keep.txt)
+          echo "transcripts in GENCODE file: $all; kept (in the GTF): $kept; tx2gene rows: $want" | tee -a log/transcriptome.log
+          test "$kept" -eq "$want"
+      - name: Salmon index (timed, as a trainee would build it)
+        run: |
+          set -euxo pipefail
+          salmon=/opt/conda/envs/rnaseq-ready/bin/salmon
+          $salmon --version | tee -a log/transcriptome.log
+          /usr/bin/time -v $salmon index -t out/gencode.v${GENCODE}.transcripts.chr.fa.gz -i salmon_index --gencode -p 2 \
+            > log/salmon-index.log 2> log/salmon-index.time || { tail -50 log/salmon-index.time; exit 1; }
+          grep -E "Elapsed|Maximum resident" log/salmon-index.time | tee -a log/transcriptome.log
+          tar -czf out/salmon_index.gencode.v${GENCODE}.tar.gz salmon_index
+          du -sh salmon_index out/* | tee -a log/transcriptome.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transcriptome
+          path: out/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: log-transcriptome
+          path: log/
+          retention-days: 7
+
+  airway:
+    needs: transcriptome
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    container:
+      image: ghcr.io/onedimkurt/bioinfo-workshop:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      # ENA cut transfers short when all eight runs downloaded at once (data run #3).
+      max-parallel: 3
+      matrix:
+        run: [SRR1039508, SRR1039509, SRR1039512, SRR1039513, SRR1039516, SRR1039517, SRR1039520, SRR1039521]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: transcriptome
+          path: ref
+      - name: Download ${{ matrix.run }} from ENA and check MD5
+        run: |
+          set -euo pipefail
+          mkdir -p fq out log
+          # fetch HOST/PATH FILE MD5: resumes a cut transfer, alternates https and ftp,
+          # and stops only when the MD5 that ENA publishes matches.
+          fetch() {
+            local url="$1" f="$2" m="$3" a proto rc
+            for a in 1 2 3 4 5 6 7 8 9 10; do
+              if [ $((a % 2)) -eq 1 ]; then proto=https; else proto=ftp; fi
+              rc=0
+              curl -fSL -sS --connect-timeout 30 --speed-limit 100000 --speed-time 60 \
+                -C - -o "$f" "${proto}://${url}" || rc=$?
+              if [ -s "$f" ] && echo "$m  $f" | md5sum -c --status -; then
+                echo "$f: MD5 OK ($m) after $a attempt(s), last via $proto"
+                return 0
+              fi
+              echo "$f: attempt $a via $proto ended with curl exit $rc, $(stat -c %s "$f" 2>/dev/null || echo 0) bytes so far"
+              # a complete file with the wrong MD5 cannot be resumed: start it again
+              if [ "$rc" -eq 0 ]; then rm -f "$f"; fi
+              sleep $((a * 15))
+            done
+            return 1
+          }
+          info=$(curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=${{ matrix.run }}&result=read_run&fields=fastq_ftp,fastq_md5,read_count&format=tsv" | tail -n 1)
+          echo "$info" | tee log/${{ matrix.run }}.log
+          urls=$(echo "$info" | cut -f2); md5s=$(echo "$info" | cut -f3)
+          # Some runs also list an unpaired SRRxxx.fastq.gz; only _1 and _2 are used.
+          i=1
+          for u in $(echo "$urls" | tr ';' ' '); do
+            m=$(echo "$md5s" | cut -d';' -f$i)
+            i=$((i+1))
+            case "$u" in
+              *_1.fastq.gz|*_2.fastq.gz) fetch "$u" "fq/$(basename "$u")" "$m" | tee -a log/${{ matrix.run }}.log ;;
+              *) echo "skipped (unpaired reads, not used): $(basename "$u")" | tee -a log/${{ matrix.run }}.log ;;
+            esac
+          done
+          test -s fq/${{ matrix.run }}_1.fastq.gz && test -s fq/${{ matrix.run }}_2.fastq.gz
+          ls -l fq | tee -a log/${{ matrix.run }}.log
+      - name: Salmon quant at full depth
+        run: |
+          set -euxo pipefail
+          tar -xzf ref/salmon_index.gencode.v${GENCODE}.tar.gz
+          salmon=/opt/conda/envs/rnaseq-ready/bin/salmon
+          /usr/bin/time -v $salmon quant -i salmon_index -l A \
+            -1 fq/${{ matrix.run }}_1.fastq.gz -2 fq/${{ matrix.run }}_2.fastq.gz \
+            -p 4 --validateMappings -o quant/${{ matrix.run }} > log/${{ matrix.run }}-quant.log 2> log/${{ matrix.run }}-quant.time
+          grep -E "Elapsed|Maximum resident" log/${{ matrix.run }}-quant.time | tee -a log/${{ matrix.run }}.log
+          grep -E "Mapping rate|percent_mapped" quant/${{ matrix.run }}/logs/salmon_quant.log quant/${{ matrix.run }}/aux_info/meta_info.json | tee -a log/${{ matrix.run }}.log || true
+          gzip -n quant/${{ matrix.run }}/quant.sf
+          tar -czf out/salmon_quant.${{ matrix.run }}.tar.gz -C quant ${{ matrix.run }}
+      - name: 1M-pair subset for the trainees (first two runs only)
+        if: matrix.run == 'SRR1039508' || matrix.run == 'SRR1039509'
+        run: |
+          set -euxo pipefail
+          /opt/conda/bin/conda create -y -q -n tools seqtk
+          seqtk=/opt/conda/envs/tools/bin/seqtk
+          for r in 1 2; do
+            $seqtk sample -s "$SEED" fq/${{ matrix.run }}_$r.fastq.gz "$SUBSET_PAIRS" | gzip -n > out/${{ matrix.run }}_$r.sub.fastq.gz
+          done
+          for r in 1 2; do echo "subset R$r reads: $(( $(zcat out/${{ matrix.run }}_$r.sub.fastq.gz | wc -l) / 4 ))" | tee -a log/${{ matrix.run }}.log; done
+          salmon=/opt/conda/envs/rnaseq-ready/bin/salmon
+          /usr/bin/time -v $salmon quant -i salmon_index -l A \
+            -1 out/${{ matrix.run }}_1.sub.fastq.gz -2 out/${{ matrix.run }}_2.sub.fastq.gz \
+            -p 2 --validateMappings -o subquant/${{ matrix.run }} > /dev/null 2> log/${{ matrix.run }}-subquant.time
+          grep -E "Elapsed|Maximum resident" log/${{ matrix.run }}-subquant.time | sed 's/^/subset quant (2 threads): /' | tee -a log/${{ matrix.run }}.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airway-${{ matrix.run }}
+          path: out/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-airway-${{ matrix.run }}
+          path: log/
+          retention-days: 7
+
+  small-datasets:
+    if: github.repository == 'onedimkurt/bioinfo-workshop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/onedimkurt/bioinfo-workshop:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Day 1 sample sheet (airway) and capstone counts (pasilla) from Bioconductor
+        run: |
+          set -euxo pipefail
+          mkdir -p out log
+          Rscript -e 'pak::pkg_install(c("bioc::airway", "bioc::pasilla"), ask = FALSE)' > log/r-install.log 2>&1 || { tail -40 log/r-install.log; exit 1; }
+          Rscript -e '
+            suppressPackageStartupMessages(library(airway)); data(airway)
+            cd <- as.data.frame(SummarizedExperiment::colData(airway))
+            cd$run <- rownames(cd)
+            write.csv(cd[, c("run", setdiff(names(cd), "run"))], "out/airway_samples.csv", row.names = FALSE)
+            cat("airway", format(packageVersion("airway")), "\n")
+            print(cd)
+            d <- system.file("extdata", package = "pasilla")
+            file.copy(file.path(d, "pasilla_gene_counts.tsv"), "out/capstone_pasilla_gene_counts.tsv")
+            file.copy(file.path(d, "pasilla_sample_annotation.csv"), "out/capstone_pasilla_samples.csv")
+            cat("pasilla", format(packageVersion("pasilla")), "\n")
+          ' 2>&1 | tee log/bioc-data.log
+          gzip -n out/capstone_pasilla_gene_counts.tsv
+      - name: Day 2 single-cell (10x PBMC 3k filtered matrix)
+        run: |
+          set -euxo pipefail
+          curl -fsSL --retry 5 -o out/pbmc3k_filtered_gene_bc_matrices.tar.gz \
+            https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz
+          tar -tzf out/pbmc3k_filtered_gene_bc_matrices.tar.gz | tee log/pbmc3k.log
+      - name: Day 2 variants (NA12878 reads in the window, chr20 reference, GIAB truth)
+        run: |
+          set -euxo pipefail
+          env=/opt/conda/envs/variants-ready/bin
+          curl -fsSL --retry 5 -o out/chr20.fa.gz https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr20.fa.gz
+          echo "chr20 bases: $(zcat out/chr20.fa.gz | grep -v '>' | tr -d '\n' | wc -c)" | tee log/variants.log
+          hc=https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage
+          curl -fsSL --retry 8 --retry-all-errors --retry-delay 10 -o seqindex.tsv "$hc/1000G_2504_high_coverage.sequence.index"
+          cram=$(grep -v '^#' seqindex.tsv | awk -F'\t' '$0 ~ /NA12878/ && $1 ~ /\.cram$/ {print $1}' | sed -n 1p)
+          echo "CRAM: $cram" | tee -a log/variants.log
+          test -n "$cram"
+          case "$cram" in ftp://*) cram="https://${cram#ftp://}";; esac
+          run=$(basename "$(dirname "$cram")"); file=$(basename "$cram")
+          # The same CRAM from three places: EBI over https and ftp, and the AWS open-data
+          # mirror of 1000 Genomes (EBI answered 403 once on 2026-10-01).
+          sources="$cram ftp://${cram#https://} https://1000genomes.s3.amazonaws.com/1000G_2504_high_coverage/data/$run/$file"
+          # The CRAM needs its reference to decode; chr20 of UCSC hg38 has the same MD5
+          # as the CRAM header's chr20 (b18e6c53..., checked in data run #5).
+          zcat out/chr20.fa.gz > chr20.fa
+          $env/samtools faidx chr20.fa
+          echo "chr20 M5, UCSC hg38: $($env/samtools dict chr20.fa | grep -o 'M5:[0-9a-f]*')" | tee -a log/variants.log
+          used=""
+          for attempt in 1 2 3; do
+            for src in $sources; do
+              if $env/samtools view -H "$src" > header.sam && $env/samtools view -T chr20.fa -b -o window.bam "$src" "$WINDOW"; then
+                used="$src"; break 2
+              fi
+              echo "source failed (attempt $attempt): $src" | tee -a log/variants.log
+            done
+            sleep 60
+          done
+          test -n "$used"
+          echo "CRAM read from: $used" | tee -a log/variants.log
+          echo "chr20 M5, CRAM header: $(grep -P '\tSN:chr20\t' header.sam | grep -o 'M5:[0-9a-f]*')" | tee -a log/variants.log
+          $env/samtools flagstat window.bam | tee -a log/variants.log
+          $env/samtools collate -u -O window.bam tmp.collate \
+            | $env/samtools fastq -F 0x900 -1 out/NA12878_window_1.fastq.gz -2 out/NA12878_window_2.fastq.gz -0 /dev/null -s /dev/null -n -
+          for r in 1 2; do echo "window R$r reads: $(( $(zcat out/NA12878_window_$r.fastq.gz | wc -l) / 4 ))" | tee -a log/variants.log; done
+          giab=https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/NA12878_HG001/NISTv4.2.1/GRCh38
+          curl -fsSL --retry 5 -o truth.vcf.gz "$giab/HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+          curl -fsSL --retry 5 -o truth.vcf.gz.tbi "$giab/HG001_GRCh38_1_22_v4.2.1_benchmark.vcf.gz.tbi"
+          curl -fsSL --retry 5 -o truth.bed "$giab/HG001_GRCh38_1_22_v4.2.1_benchmark.bed"
+          $env/bcftools view -r "$WINDOW" -Oz -o out/NA12878_GIAB_v4.2.1_window.vcf.gz truth.vcf.gz
+          $env/bcftools index -t out/NA12878_GIAB_v4.2.1_window.vcf.gz
+          start=${WINDOW#*:}; start=${start%-*}; end=${WINDOW#*-}
+          awk -v s="$start" -v e="$end" -F'\t' '$1=="chr20" && $3>s && $2<e' truth.bed > out/NA12878_GIAB_v4.2.1_window_confident.bed
+          echo "truth variants in window: $($env/bcftools view -H out/NA12878_GIAB_v4.2.1_window.vcf.gz | wc -l)" | tee -a log/variants.log
+          echo "confident bases in window: $(awk '{s+=$3-$2} END {print s}' out/NA12878_GIAB_v4.2.1_window_confident.bed)" | tee -a log/variants.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: small-datasets
+          path: out/
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-small-datasets
+          path: log/
+          retention-days: 7
+
+  publish:
+    needs: [transcriptome, airway, small-datasets]
+    if: always() && github.repository == 'onedimkurt/bioinfo-workshop'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space on the runner
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Files from an earlier run (transcriptome, airway)
+        if: inputs.reuse_run != ''
+        uses: actions/download-artifact@v4
+        with:
+          path: art
+          run-id: ${{ inputs.reuse_run }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Manifest and checksums
+        id: manifest
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p rel status/data art
+          find art -path 'art/log-*' -prune -o -type f -print | while read -r f; do cp "$f" rel/; done
+          (cd rel && sha256sum * | sort -k2 > SHA256SUMS)
+          (cd rel && ls -l --time-style=+ | awk 'NR>1 {printf "%s\t%d\n", $NF, $5}') > status/data/MANIFEST.tsv
+          cp rel/SHA256SUMS status/data/
+          for d in art/log-*; do [ -d "$d" ] && cat "$d"/*.log > "status/data/$(basename "$d").log" 2>/dev/null || true; done
+          {
+            echo "run: ${{ github.run_id }}"
+            echo "transcriptome: ${{ needs.transcriptome.result }}"
+            echo "airway: ${{ needs.airway.result }}"
+            echo "small-datasets: ${{ needs.small-datasets.result }}"
+          } > status/data/STATUS
+          echo "reused from run: ${{ inputs.reuse_run }}" >> status/data/STATUS
+          missing=0
+          for f in gencode.v${GENCODE}.transcripts.chr.fa.gz tx2gene.gencode.v${GENCODE}.tsv.gz genes.gencode.v${GENCODE}.tsv.gz salmon_index.gencode.v${GENCODE}.tar.gz \
+                   salmon_quant.SRR1039508.tar.gz salmon_quant.SRR1039509.tar.gz salmon_quant.SRR1039512.tar.gz salmon_quant.SRR1039513.tar.gz \
+                   salmon_quant.SRR1039516.tar.gz salmon_quant.SRR1039517.tar.gz salmon_quant.SRR1039520.tar.gz salmon_quant.SRR1039521.tar.gz \
+                   SRR1039508_1.sub.fastq.gz SRR1039508_2.sub.fastq.gz SRR1039509_1.sub.fastq.gz SRR1039509_2.sub.fastq.gz \
+                   airway_samples.csv capstone_pasilla_gene_counts.tsv.gz capstone_pasilla_samples.csv pbmc3k_filtered_gene_bc_matrices.tar.gz \
+                   chr20.fa.gz NA12878_window_1.fastq.gz NA12878_window_2.fastq.gz \
+                   NA12878_GIAB_v4.2.1_window.vcf.gz NA12878_GIAB_v4.2.1_window.vcf.gz.tbi NA12878_GIAB_v4.2.1_window_confident.bed; do
+            if [ -s "rel/$f" ]; then :; else echo "missing: $f" | tee -a status/data/STATUS; missing=$((missing + 1)); fi
+          done
+          echo "complete: $([ "$missing" -eq 0 ] && echo yes || echo "no ($missing missing)")" | tee -a status/data/STATUS
+          echo "complete=$([ "$missing" -eq 0 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          cat status/data/STATUS status/data/MANIFEST.tsv
+      - name: Publish the release assets
+        if: steps.manifest.outputs.complete == 'yes' && needs.small-datasets.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag || 'data-v1' }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Workshop data ($TAG)" \
+              --notes "Datasets for the bioinfo-workshop days. Provenance and licences: data/README.md. Checksums: SHA256SUMS."
+          fi
+          gh release upload "$TAG" rel/* --clobber
+          echo "published: $TAG" | tee -a status/data/STATUS
+      - name: The trainees' download lists work against the release
+        if: steps.manifest.outputs.complete == 'yes' && needs.small-datasets.result == 'success'
+        run: |
+          set -uo pipefail
+          cp rel/SHA256SUMS data/SHA256SUMS
+          for d in 1 2 3; do
+            if bash setup/day$d.sh > status/data/setup-day$d.log 2>&1; then r=PASS; else r=FAIL; fi
+            echo "setup/day$d.sh: $r ($(grep -c ': OK$' status/data/setup-day$d.log) files OK)" | tee -a status/data/STATUS
+          done
+          du -sh data | tee -a status/data/STATUS
+      - name: Write status to the ci-status branch
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p status/data && touch status/data/STATUS
+          rm -rf /tmp/status-new && cp -r status /tmp/status-new
+          for attempt in 1 2 3; do
+            if git fetch -q origin ci-status; then
+              git checkout -q -f -B ci-status FETCH_HEAD
+            else
+              git checkout -q -f --orphan ci-status && { git rm -rq --cached . >/dev/null 2>&1 || true; }
+            fi
+            rm -rf status/data && mkdir -p status && cp -r /tmp/status-new/data status/data
+            git add status/data
+            git commit -qm "data run ${{ github.run_id }}" || true
+            git push -q origin HEAD:refs/heads/ci-status && break
+            sleep 5
+          done

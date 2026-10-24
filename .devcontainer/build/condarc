@@ -1,0 +1,10 @@
+# /opt/conda/.condarc -- installed by the bioinfo-workshop image (WORKSHOP.md §6)
+channels:
+  - conda-forge
+  - bioconda
+channel_priority: strict
+envs_dirs:
+  - /opt/conda/envs
+pkgs_dirs:
+  - /opt/conda/pkgs
+show_channel_urls: true

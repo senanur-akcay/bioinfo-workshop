@@ -1,0 +1,16 @@
+# RStudio (the four lines RStudio itself would add)
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Outputs are made again from the scripts; they are not kept in git
+results/
+Rplots.pdf
+*.rds
+.Renviron
+
+# Downloaded data: re-downloaded with setup/dayN.sh; only the README and checksums are kept
+data/*
+!data/README.md
+!data/SHA256SUMS

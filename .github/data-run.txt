@@ -1,0 +1,1 @@
+2026-10-02: full run, transcriptome restricted to the reference chromosomes (tx2gene mismatch found by the Day-1 reference review); all Salmon results re-quantified.

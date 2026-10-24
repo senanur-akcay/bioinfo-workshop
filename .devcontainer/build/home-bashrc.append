@@ -1,0 +1,21 @@
+
+# --- bioinfo-workshop: every terminal shows its conda environment in the prompt ---
+# Last in this file, after Ubuntu's prompt is set. A new terminal starts in base. A
+# terminal that RStudio restores after the codespace was stopped inherits the old
+# environment variables but not the prompt; activate that environment again so the
+# prompt names it (seen 2026-10-01).
+if type conda >/dev/null 2>&1; then
+    __bw_env="${CONDA_DEFAULT_ENV:-base}"
+    case "${PS1:-}" in
+        "(${__bw_env}) "*) ;;
+        *)
+            __bw_i=0
+            while [ "${CONDA_SHLVL:-0}" -gt 0 ] && [ "${__bw_i}" -lt 5 ]; do
+                conda deactivate >/dev/null 2>&1 || break
+                __bw_i=$((__bw_i + 1))
+            done
+            conda activate "${__bw_env}" 2>/dev/null || conda activate base
+            ;;
+    esac
+    unset __bw_env __bw_i
+fi

@@ -1,0 +1,9 @@
+# Build-side only: puts the packages of the Day-1 live exercise (WORKSHOP.md §6 steps 3-4)
+# into the package cache; the environment itself is removed again during the build.
+name: cache-warm
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - seqkit=2.14.0
+  - seqtk=1.5

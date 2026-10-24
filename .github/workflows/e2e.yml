@@ -1,0 +1,64 @@
+# End-to-end test of every setup step a trainee performs, pre-flight to Day 3, inside the
+# published image. Runs after every successful image build, when a checker or download
+# list changes, and by hand. Organiser-only: moved out of the template at the freeze (R84).
+# Results go to the branch "ci-status" (status/e2e/).
+name: e2e
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [image]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ["check/**", "setup/**", "data/SHA256SUMS", ".github/e2e/**", ".github/workflows/e2e.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    if: github.repository == 'onedimkurt/bioinfo-workshop' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space on the runner
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Pull the workshop image
+        run: docker pull -q ghcr.io/onedimkurt/bioinfo-workshop:latest
+      - name: Trainee path, pre-flight to Day 3
+        id: e2e
+        run: |
+          mkdir -p e2e-out && chmod 777 e2e-out
+          docker run --rm -u rstudio -v "$PWD:/src:ro" -v "$PWD/e2e-out:/out" \
+            ghcr.io/onedimkurt/bioinfo-workshop:latest bash /src/.github/e2e/ci-driver.sh /src /out
+      - name: Write status to the ci-status branch
+        if: always()
+        run: |
+          set -u
+          mkdir -p /tmp/st/e2e
+          cp -f e2e-out/* /tmp/st/e2e/ 2>/dev/null || true
+          {
+            echo "run: ${{ github.run_id }}  event: ${{ github.event_name }}"
+            echo "commit: ${{ github.sha }}"
+            echo "image: $(cat e2e-out/image 2>/dev/null)"
+            echo "e2e: ${{ steps.e2e.outcome }}"
+            grep -h '^== e2e result' e2e-out/*.log 2>/dev/null
+          } > /tmp/st/e2e/STATUS
+          cat /tmp/st/e2e/STATUS
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            if git fetch -q origin ci-status; then git checkout -q -f -B ci-status FETCH_HEAD
+            else git checkout -q -f --orphan ci-status && { git rm -rq --cached . >/dev/null 2>&1 || true; }; fi
+            rm -rf status/e2e && mkdir -p status && cp -r /tmp/st/e2e status/e2e
+            git add status/e2e
+            git commit -qm "e2e run ${{ github.run_id }}: ${{ steps.e2e.outcome }}" || true
+            git push -q origin HEAD:refs/heads/ci-status && break
+            sleep 5
+          done
