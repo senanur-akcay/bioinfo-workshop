@@ -1,0 +1,8 @@
+name: deneme
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - seqkit
+  - seqtk
+prefix: /opt/conda/envs/deneme
