@@ -110,3 +110,10 @@ git add scripts/
 git commit -m "Day 1: reads to counts"
 git push
 
+#gün sonu commit
+git add scripts/
+git commit -m "Day 1: differential expression"
+git push
+git log --oneline
+git status
+
