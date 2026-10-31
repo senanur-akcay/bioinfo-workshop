@@ -215,6 +215,3 @@ samtools tview -d T -w 100 -p chr20:$((fp - 40)) results/align/NA12878.bam resul
 
 
 
-
-
-
