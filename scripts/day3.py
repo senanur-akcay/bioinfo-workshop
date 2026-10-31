@@ -1,0 +1,2 @@
+#kütüphaneleri indir.
+library(tidyverse)
